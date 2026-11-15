@@ -2,7 +2,7 @@ import type { AuthResponse, DashboardMetrics, EvaluationResult, Question, Resume
 import { calculateRealtimeATSAnalysis } from '../utils/atsScanner';
 import { userPracticeStore } from '../utils/userPracticeStore';
 
-const API_BASE_URL = 'http://localhost:8080/api';
+const API_BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || 'http://localhost:8080/api';
 
 const getAuthHeader = (): Record<string, string> => {
   const token = localStorage.getItem('jwt_token');
@@ -13,20 +13,40 @@ export const api = {
   // Auth API
   async login(email: string, password: string): Promise<AuthResponse> {
     const cleanEmail = (email || '').trim().toLowerCase();
+    if (!cleanEmail || !password) {
+      throw new Error('Please enter both email and password.');
+    }
+
+    let isOfflineNetworkError = false;
     try {
       const res = await fetch(`${API_BASE_URL}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: cleanEmail, password })
       });
-      if (!res.ok) throw new Error('Invalid credentials');
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => null);
+        const errorMsg = errorData?.message || (res.status === 401 ? 'Invalid email or password' : 'Authentication failed');
+        // Server rejected credentials. DO NOT FALL BACK TO AUTO-LOGIN!
+        throw new Error(errorMsg);
+      }
+
       const data = await res.json();
       localStorage.setItem('jwt_token', data.token);
       localStorage.setItem('current_user', JSON.stringify(data));
       return data;
-    } catch {
-      // Offline fallback: check registered users in localStorage
-      let usersMap: Record<string, AuthResponse> = {};
+    } catch (err: any) {
+      // If the error was explicitly thrown above because the server rejected credentials, propagate it immediately!
+      if (err.message && (err.message.includes('Invalid') || err.message.includes('credentials') || err.message.includes('failed') || err.message.includes('password'))) {
+        throw err;
+      }
+      isOfflineNetworkError = true;
+    }
+
+    // STRICT Offline Fallback (only triggered when backend server cannot be reached):
+    if (isOfflineNetworkError) {
+      let usersMap: Record<string, any> = {};
       try {
         usersMap = JSON.parse(localStorage.getItem('registered_users') || '{}');
       } catch {
@@ -34,39 +54,96 @@ export const api = {
       }
 
       const existing = usersMap[cleanEmail];
-      const authUser: AuthResponse = existing || {
-        token: `jwt-token-${Date.now()}`,
-        type: 'Bearer',
-        id: Date.now(),
-        email: cleanEmail || 'student@fyp.com',
-        fullName: cleanEmail ? cleanEmail.split('@')[0] : 'Candidate',
-        role: 'ROLE_STUDENT',
-        targetRole: 'Software Development Engineer'
-      };
+      if (existing) {
+        if (existing.password && existing.password !== password) {
+          throw new Error('Invalid email or password.');
+        }
+        const authUser: AuthResponse = {
+          token: existing.token || `jwt-token-${Date.now()}`,
+          type: 'Bearer',
+          id: existing.id || Date.now(),
+          email: cleanEmail,
+          fullName: existing.fullName || cleanEmail.split('@')[0],
+          role: existing.role || 'ROLE_STUDENT',
+          targetRole: existing.targetRole || 'Software Development Engineer'
+        };
+        localStorage.setItem('jwt_token', authUser.token);
+        localStorage.setItem('current_user', JSON.stringify(authUser));
+        return authUser;
+      }
 
-      localStorage.setItem('jwt_token', authUser.token);
-      localStorage.setItem('current_user', JSON.stringify(authUser));
-      return authUser;
+      // Default demo candidate credentials
+      if (cleanEmail === 'student@fyp.com') {
+        if (password !== 'password123') {
+          throw new Error('Invalid email or password.');
+        }
+        const demoUser: AuthResponse = {
+          token: `jwt-token-${Date.now()}`,
+          type: 'Bearer',
+          id: 1,
+          email: 'student@fyp.com',
+          fullName: 'Alex Johnson',
+          role: 'ROLE_STUDENT',
+          targetRole: 'Software Development Engineer'
+        };
+        localStorage.setItem('jwt_token', demoUser.token);
+        localStorage.setItem('current_user', JSON.stringify(demoUser));
+        return demoUser;
+      }
+
+      throw new Error('No account found with this email. Please register first.');
     }
+
+    throw new Error('Authentication failed');
   },
 
   async register(fullName: string, email: string, password: string, targetRole: string): Promise<AuthResponse> {
     const cleanEmail = (email || '').trim().toLowerCase();
     const cleanName = (fullName || '').trim() || cleanEmail.split('@')[0] || 'Candidate';
+
+    if (!cleanEmail || !password) {
+      throw new Error('Email and password are required.');
+    }
+
+    let isOfflineNetworkError = false;
     try {
       const res = await fetch(`${API_BASE_URL}/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ fullName: cleanName, email: cleanEmail, password, targetRole })
       });
-      if (!res.ok) throw new Error('Registration failed');
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => null);
+        const errorMsg = errorData?.message || 'Registration failed. Email might already be registered.';
+        throw new Error(errorMsg);
+      }
+
       const data = await res.json();
       localStorage.setItem('jwt_token', data.token);
       localStorage.setItem('current_user', JSON.stringify(data));
-      // Fresh new registration starts with clean zero metrics
       userPracticeStore.initializeNewUser(cleanEmail);
       return data;
-    } catch {
+    } catch (err: any) {
+      if (err.message && (err.message.includes('already in use') || err.message.includes('Registration failed') || err.message.includes('required'))) {
+        throw err;
+      }
+      isOfflineNetworkError = true;
+    }
+
+    // Offline storage of user registration
+    if (isOfflineNetworkError) {
+      let usersMap: Record<string, any> = {};
+      try {
+        usersMap = JSON.parse(localStorage.getItem('registered_users') || '{}');
+      } catch {
+        usersMap = {};
+      }
+
+      if (usersMap[cleanEmail] || cleanEmail === 'student@fyp.com') {
+        throw new Error('Email address is already in use!');
+      }
+
       const authUser: AuthResponse = {
         token: `jwt-token-${Date.now()}`,
         type: 'Bearer',
@@ -77,21 +154,16 @@ export const api = {
         targetRole: targetRole || 'Software Development Engineer'
       };
 
-      // Persist in registered users map
-      let usersMap: Record<string, AuthResponse> = {};
-      try {
-        usersMap = JSON.parse(localStorage.getItem('registered_users') || '{}');
-      } catch {
-        usersMap = {};
-      }
-      usersMap[cleanEmail] = authUser;
+      // Store with password so offline login can verify password match
+      usersMap[cleanEmail] = { ...authUser, password };
       localStorage.setItem('registered_users', JSON.stringify(usersMap));
       localStorage.setItem('jwt_token', authUser.token);
       localStorage.setItem('current_user', JSON.stringify(authUser));
-      // Fresh new registration starts with clean zero metrics
       userPracticeStore.initializeNewUser(cleanEmail);
       return authUser;
     }
+
+    throw new Error('Registration failed.');
   },
 
   // Questions API

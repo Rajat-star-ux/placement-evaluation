@@ -70,19 +70,20 @@ public class AnalyticsService {
             item.put("date", c.getCreatedAt() != null ? c.getCreatedAt().toString().split("T")[0] : "");
             activityList.add(item);
         }
-        resumeOpt.ifPresent(r -> {
+        if (resumeOpt.isPresent()) {
+            Resume r = resumeOpt.get();
             Map<String, Object> item = new HashMap<>();
             item.put("type", "RESUME_ATS");
             item.put("title", "ATS Resume Scan (" + r.getTargetJobRole() + ")");
             item.put("score", r.getAtsScore());
             item.put("date", r.getCreatedAt() != null ? r.getCreatedAt().toString().split("T")[0] : "");
             activityList.add(item);
-        });
+        }
 
         // Limit to 6 most recent activities
-        if (activityList.size() > 6) {
-            activityList = activityList.subList(0, 6);
-        }
+        List<Map<String, Object>> recentActivities = activityList.size() > 6 
+                ? activityList.subList(0, 6) 
+                : activityList;
 
         return new DashboardMetricsResponse(
                 totalInterviews,
@@ -90,7 +91,7 @@ public class AnalyticsService {
                 atsScore,
                 codingCount,
                 domainScores,
-                activityList
+                recentActivities
         );
     }
 
